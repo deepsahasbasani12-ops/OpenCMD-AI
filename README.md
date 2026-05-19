@@ -25,7 +25,7 @@ The app currently supports:
 - `qwen2:0.5b`
 - `qwen2:1.5b`
 - `phi3:mini`
-- `deepseek-coder:0.8b`
+- `deepseek-coder:1.3b`
 - `qwen2.5-coder:0.5b`
 - `qwen2.5-coder:1.5b`
 
