@@ -185,6 +185,16 @@ ollama pull qwen2.5-coder:1.5b
 
 ---
 
+### Option 3 - Inbuilt Downloader
+1. Install Ollama App
+2. Install OpenCMD-AI App
+3. Open the OpenCMD-AI App
+4. Select the model you want to install.
+5. A Popup will ask you if you want to install the model.
+6. Click `Yes`, and wait for installation to complete.
+
+---
+
 ## How It Works
 
 OpenCMD Terminal connects to your local Ollama installation and allows you to interact with local AI models through a clean terminal-style interface.
