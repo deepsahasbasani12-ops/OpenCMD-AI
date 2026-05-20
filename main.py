@@ -37,6 +37,9 @@ class OllamaAssistantGUI:
         # Ensure Ollama is visible to this app, especially when running as an exe
         self.configure_ollama_path()
         
+        # Check if selected model is available, prompt download if not
+        self.check_and_handle_model_availability()
+        
         # Load saved conversation if exists (after UI is ready)
         self.load_memory()
     def setup_ui(self):
@@ -120,6 +123,7 @@ class OllamaAssistantGUI:
             state='readonly',
             width=20
         )
+        model_combo.bind("<<ComboboxSelected>>", lambda e: self.on_model_changed())
         model_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
         # Style the combobox
@@ -214,7 +218,7 @@ class OllamaAssistantGUI:
         save_button.pack(side=tk.LEFT, padx=5)
         
         # Initial message
-        self.display_message("SYSTEM", ">> OpenCMD-AI v1.1", "assistant")
+        self.display_message("SYSTEM", ">> OpenCMD-AI v1.1.2", "assistant")
         self.display_message("SYSTEM", ">> Ready to process your queries...", "assistant")
     
     def configure_ollama_path(self):
@@ -256,6 +260,121 @@ class OllamaAssistantGUI:
             )
             self.log_event("Ollama executable not found", level="ERROR")
             self.display_message("ERROR", self.ollama_error, "error")
+
+    def on_model_changed(self):
+        """Handle model change from combobox selection"""
+        is_available, available_models = self.check_model_availability()
+        
+        if not is_available:
+            selected_model = self.selected_model.get()
+            self.display_message("SYSTEM", f">> Model '{selected_model}' not found locally", "assistant")
+            self.prompt_download_model()
+
+    def check_and_handle_model_availability(self):
+        """Check model availability and prompt for download if needed"""
+        is_available, available_models = self.check_model_availability()
+        
+        if not is_available:
+            self.root.after(500, self.prompt_download_model)  # Delay to ensure UI is ready
+
+    def check_model_availability(self):
+        """Check if the selected model is installed. Returns (is_available, available_models)"""
+        try:
+            if not self.ollama_binary:
+                self.log_event("Cannot check model availability: Ollama binary not found", level="WARNING")
+                return False, []
+            
+            # Run 'ollama list' to get installed models
+            result = subprocess.run(
+                [self.ollama_binary, "list"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            if result.returncode != 0:
+                self.log_event(f"Failed to list models: {result.stderr}", level="ERROR")
+                return False, []
+            
+            # Parse model names from output
+            # Format: "NAME                    ID              SIZE      MODIFIED"
+            # "qwen2:0.5b             abc123...      1.3 GB    2 hours ago"
+            available_models = []
+            for line in result.stdout.strip().split('\n')[1:]:  # Skip header
+                if line.strip():
+                    parts = line.split()
+                    if parts:
+                        available_models.append(parts[0])
+            
+            selected_model = self.selected_model.get()
+            is_available = selected_model in available_models
+            
+            self.log_event(f"Model check: {selected_model} - {'Available' if is_available else 'Not found'}. Available: {', '.join(available_models)}")
+            return is_available, available_models
+            
+        except Exception as e:
+            self.log_event(f"Error checking model availability: {e}", level="ERROR")
+            return False, []
+
+    def download_model(self):
+        """Download the selected model in background thread with progress display"""
+        try:
+            selected_model = self.selected_model.get()
+            self.display_message("SYSTEM", f">> Starting download of model: {selected_model}", "assistant")
+            self.log_event(f"Starting model download: {selected_model}")
+            
+            if not self.ollama_binary:
+                raise RuntimeError("Ollama binary not found")
+            
+            # Run 'ollama pull <model>' with streaming output
+            process = subprocess.Popen(
+                [self.ollama_binary, "pull", selected_model],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                encoding='utf-8',
+                errors='replace',
+                bufsize=1
+            )
+            
+            # Read output line by line and display progress
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if line:
+                    self.root.after(0, lambda msg=line: self.display_message("DOWNLOAD", msg, "assistant"))
+                    self.log_event(f"Download progress: {line}")
+            
+            process.wait()
+            
+            if process.returncode == 0:
+                self.display_message("SYSTEM", f">> Successfully downloaded {selected_model}", "assistant")
+                self.log_event(f"Model download successful: {selected_model}")
+            else:
+                error_msg = f"Model download failed with return code {process.returncode}"
+                self.display_message("ERROR", error_msg, "error")
+                self.log_event(error_msg, level="ERROR")
+                
+        except Exception as e:
+            error_msg = f"Error downloading model: {str(e)}"
+            self.display_message("ERROR", error_msg, "error")
+            self.log_event(error_msg, level="ERROR")
+
+    def prompt_download_model(self):
+        """Prompt user to download missing model with yes/no dialog"""
+        selected_model = self.selected_model.get()
+        message = f"Model '{selected_model}' is not installed.\n\nWould you like to download it now?\n\n(This may take several minutes depending on model size)"
+        
+        if messagebox.askyesno("Model Not Found", message):
+            self.display_message("SYSTEM", ">> User confirmed download", "assistant")
+            # Run download in background thread
+            thread = threading.Thread(target=self.download_model)
+            thread.daemon = True
+            thread.start()
+        else:
+            self.display_message("SYSTEM", ">> Download cancelled. App may fail on first query if model not available.", "assistant")
+            self.log_event("User declined model download")
 
     def setup_logging(self):
         """Create the application log file and record startup information."""
