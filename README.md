@@ -4,6 +4,8 @@ A lightweight AI terminal application powered by **Ollama** that lets you run lo
 
 Perfect for developers, students, and AI enthusiasts who want a fast, private, and offline AI experience.
 
+Responses in less than 15 seconds and smart UI for easier understanding.
+
 ---
 
 ## What is OpenCMD Terminal?
