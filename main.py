@@ -17,6 +17,11 @@ class OllamaAssistantGUI:
         
         self.conversation_history = []
         self.is_processing = False
+        self.thinking_status_label = None
+        self.thinking_after_id = None
+        self.thinking_tick = 0
+        self.typing_queue = []
+        self.typing_in_progress = False
         self.selected_model = tk.StringVar(value='qwen2:0.5b')
         app_data_dir = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "OllamaTerminal")
         os.makedirs(app_data_dir, exist_ok=True)
@@ -37,7 +42,7 @@ class OllamaAssistantGUI:
         # Ensure Ollama is visible to this app, especially when running as an exe
         self.configure_ollama_path()
         
-        # Check if selected model is available, prompt download if not
+        # Check selected model availability and prompt download if needed
         self.check_and_handle_model_availability()
         
         # Load saved conversation if exists (after UI is ready)
@@ -101,7 +106,6 @@ class OllamaAssistantGUI:
                 'deepseek-coder:1.3b',
                 'qwen3.5:0.8b',
                 'qwen3.5:2b',
-                'qwen3.5:cloud',
                 'gemma:2b',
                 'gemma:2b-instruct',
                 'gemma:2b-instruct-fp16',
@@ -112,12 +116,7 @@ class OllamaAssistantGUI:
                 'phi3:mini-128k',
                 'phi3:latest',
                 'qwen3-coder-next:latest',
-                'qwen3-coder-next:cloud',
-                'lfm2.5-thinking',
-                "embeddinggemma:300m",
-                "snowflake-arctic-embed:110m",
-                "snowflake-arctic-embed:33m",
-                "snowflake-arctic-embed:335m",
+                'lfm2.5-thinking'
             ],
             font=("Courier New", 10),
             state='readonly',
@@ -216,9 +215,17 @@ class OllamaAssistantGUI:
             activeforeground="#0a0e27"
         )
         save_button.pack(side=tk.LEFT, padx=5)
+        self.thinking_status_label = tk.Label(
+            input_frame,
+            text="",
+            font=("Courier New", 10, "italic"),
+            bg="#0a0e27",
+            fg="#00ff41"
+        )
+        self.thinking_status_label.pack(side=tk.LEFT, padx=5)
         
         # Initial message
-        self.display_message("SYSTEM", ">> OpenCMD-AI v1.1.2", "assistant")
+        self.display_message("SYSTEM", ">> OpenCMD-AI v1.2", "assistant")
         self.display_message("SYSTEM", ">> Ready to process your queries...", "assistant")
     
     def configure_ollama_path(self):
@@ -271,11 +278,11 @@ class OllamaAssistantGUI:
             self.prompt_download_model()
 
     def check_and_handle_model_availability(self):
-        """Check model availability and prompt for download if needed"""
+        """Check model availability and prompt download if needed"""
         is_available, available_models = self.check_model_availability()
         
         if not is_available:
-            self.root.after(500, self.prompt_download_model)  # Delay to ensure UI is ready
+            self.root.after(500, self.prompt_download_model)
 
     def check_model_availability(self):
         """Check if the selected model is installed. Returns (is_available, available_models)"""
@@ -284,7 +291,6 @@ class OllamaAssistantGUI:
                 self.log_event("Cannot check model availability: Ollama binary not found", level="WARNING")
                 return False, []
             
-            # Run 'ollama list' to get installed models
             result = subprocess.run(
                 [self.ollama_binary, "list"],
                 capture_output=True,
@@ -296,11 +302,8 @@ class OllamaAssistantGUI:
                 self.log_event(f"Failed to list models: {result.stderr}", level="ERROR")
                 return False, []
             
-            # Parse model names from output
-            # Format: "NAME                    ID              SIZE      MODIFIED"
-            # "qwen2:0.5b             abc123...      1.3 GB    2 hours ago"
             available_models = []
-            for line in result.stdout.strip().split('\n')[1:]:  # Skip header
+            for line in result.stdout.strip().split('\n')[1:]:
                 if line.strip():
                     parts = line.split()
                     if parts:
@@ -326,7 +329,6 @@ class OllamaAssistantGUI:
             if not self.ollama_binary:
                 raise RuntimeError("Ollama binary not found")
             
-            # Run 'ollama pull <model>' with streaming output
             process = subprocess.Popen(
                 [self.ollama_binary, "pull", selected_model],
                 stdout=subprocess.PIPE,
@@ -336,7 +338,6 @@ class OllamaAssistantGUI:
                 bufsize=1
             )
             
-            # Read output line by line and display progress
             while True:
                 line = process.stdout.readline()
                 if not line:
@@ -368,7 +369,6 @@ class OllamaAssistantGUI:
         
         if messagebox.askyesno("Model Not Found", message):
             self.display_message("SYSTEM", ">> User confirmed download", "assistant")
-            # Run download in background thread
             thread = threading.Thread(target=self.download_model)
             thread.daemon = True
             thread.start()
@@ -528,6 +528,157 @@ class OllamaAssistantGUI:
         self.chat_display.insert(tk.END, f"{message}\n\n")
         self.chat_display.config(state=tk.DISABLED)
         self.chat_display.see(tk.END)
+
+    def insert_assistant_prefix(self):
+        """Insert the assistant prefix for streaming output."""
+        self.chat_display.config(state=tk.NORMAL)
+        self.chat_display.insert(tk.END, "Assistant: ", "assistant")
+        self.chat_display.config(state=tk.DISABLED)
+        self.chat_display.see(tk.END)
+
+    def append_message_chunk(self, chunk, tag="assistant"):
+        """Append a chunk of assistant output to the chat display."""
+        if not chunk:
+            return
+        self.chat_display.config(state=tk.NORMAL)
+        self.chat_display.insert(tk.END, chunk, tag)
+        self.chat_display.config(state=tk.DISABLED)
+        self.chat_display.see(tk.END)
+
+    def normalize_stream_chunk(self, event):
+        """Extract text from a stream event emitted by Ollama."""
+        if event is None:
+            return ""
+        if isinstance(event, bytes):
+            return event.decode('utf-8', errors='replace')
+        if isinstance(event, str):
+            return event
+        if isinstance(event, dict):
+            if isinstance(event.get("message"), dict):
+                return event["message"].get("content", "") or ""
+            if event.get("content") is not None:
+                return event.get("content", "") or ""
+            if event.get("delta") is not None:
+                delta = event.get("delta")
+                if isinstance(delta, dict):
+                    return delta.get("content", "") or delta.get("text", "") or ""
+                return str(delta)
+            if event.get("text") is not None:
+                return event.get("text", "") or ""
+            return ""
+
+        if hasattr(event, "content"):
+            return str(getattr(event, "content", "") or "")
+
+        if hasattr(event, "message"):
+            msg = getattr(event, "message")
+            if isinstance(msg, dict):
+                return msg.get("content", "") or ""
+            if hasattr(msg, "content"):
+                return str(getattr(msg, "content", "") or "")
+
+        if hasattr(event, "delta"):
+            delta = getattr(event, "delta")
+            if isinstance(delta, dict):
+                return delta.get("content", "") or delta.get("text", "") or ""
+            return str(delta or "")
+
+        if hasattr(event, "text"):
+            return str(getattr(event, "text", "") or "")
+
+        if hasattr(event, "data"):
+            return str(getattr(event, "data", "") or "")
+
+        if hasattr(event, "__dict__"):
+            return self.normalize_stream_chunk(event.__dict__)
+
+        return ""
+
+    def queue_assistant_text(self, text, tag="assistant"):
+        """Queue assistant output for typing animation."""
+        if not text and text != "":
+            return
+        text = str(text)
+        if not text:
+            return
+        self.typing_queue.append((text, tag))
+        if not self.typing_in_progress:
+            self.typing_in_progress = True
+            self._type_next_char()
+
+    def _type_next_char(self, delay=15):
+        if not self.typing_queue:
+            self.typing_in_progress = False
+            return
+
+        current_text, current_tag = self.typing_queue[0]
+        if not current_text:
+            self.typing_queue.pop(0)
+            self.root.after(1, self._type_next_char)
+            return
+
+        char = current_text[0]
+        remaining = current_text[1:]
+        self.typing_queue[0] = (remaining, current_tag)
+        self.append_message_chunk(char, current_tag)
+        self.root.after(delay, self._type_next_char)
+
+    def type_out_message(self, message, delay=15):
+        """Type assistant output one character at a time."""
+        self.queue_assistant_text(message, tag="assistant")
+
+    def start_thinking_indicator(self):
+        if not getattr(self, 'thinking_status_label', None):
+            return
+        self.thinking_tick = 0
+        try:
+            self.thinking_status_label.config(text="Thinking")
+        except Exception:
+            pass
+        self.schedule_thinking_tick()
+
+    def schedule_thinking_tick(self):
+        # update the thinking indicator every 2 seconds
+        if getattr(self, 'thinking_after_id', None):
+            try:
+                self.root.after_cancel(self.thinking_after_id)
+            except Exception:
+                pass
+
+        def _tick():
+            try:
+                self.thinking_tick = (self.thinking_tick + 1) % 4
+                dots = '.' * self.thinking_tick
+                self.thinking_status_label.config(text=f"Thinking{dots}")
+            except Exception:
+                pass
+            try:
+                self.thinking_after_id = self.root.after(2000, _tick)
+            except Exception:
+                self.thinking_after_id = None
+
+        # schedule first tick after 2 seconds
+        try:
+            self.thinking_after_id = self.root.after(2000, _tick)
+        except Exception:
+            self.thinking_after_id = None
+
+    def stop_thinking_indicator(self):
+        try:
+            if getattr(self, 'thinking_after_id', None):
+                try:
+                    self.root.after_cancel(self.thinking_after_id)
+                except Exception:
+                    pass
+                self.thinking_after_id = None
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'thinking_status_label', None):
+                self.thinking_status_label.config(text="")
+        except Exception:
+            pass
+        self.thinking_tick = 0
     
     def send_message(self):
         """Send user message and get AI response"""
@@ -562,6 +713,7 @@ class OllamaAssistantGUI:
         self.send_button.config(state=tk.DISABLED)
         self.input_field.config(state=tk.DISABLED)
         self.is_processing = True
+        self.start_thinking_indicator()
         
         thread = threading.Thread(target=self.get_ai_response)
         thread.daemon = True
@@ -578,9 +730,9 @@ class OllamaAssistantGUI:
             "files": ["explorer.exe"],
             "task manager": ["taskmgr.exe"],
             "taskmgr": ["taskmgr.exe"],
-            "cmd": ["cmd.exe"],
-            "command prompt": ["cmd.exe"],
-            "powershell": ["powershell.exe"],
+            "cmd": ["cmd.exe", "/K"],
+            "command prompt": ["cmd.exe", "/K"],
+            "powershell": ["powershell.exe", "-NoExit"],
             "code": ["code"],
             "vscode": ["code"],
             "python": [sys.executable, "-m", "idlelib.idle"],
@@ -590,7 +742,29 @@ class OllamaAssistantGUI:
         if app_name in app_commands:
             try:
                 cmd = app_commands[app_name]
-                subprocess.Popen(cmd)
+                # Use Shell-backed launch methods so Windows treats this as a normal user action.
+                if sys.platform == "win32":
+                    # Prefer os.startfile for direct executables when possible (uses ShellExecute).
+                    try:
+                        exe_path = cmd[0]
+                        if os.path.exists(exe_path):
+                            os.startfile(exe_path)
+                            self.display_message("SYSTEM", f">> Opening: {app_name.upper()}", "assistant")
+                            return
+                    except Exception:
+                        pass
+
+                    # For interactive shells, use cmd /c start to let the shell create a normal console window.
+                    if app_name in ("cmd", "command prompt"):
+                        subprocess.Popen(["cmd.exe", "/c", "start", "", "cmd.exe", "/K"], shell=False)
+                    elif app_name == "powershell":
+                        subprocess.Popen(["cmd.exe", "/c", "start", "", "powershell.exe", "-NoExit"], shell=False)
+                    else:
+                        # Fall back to start via cmd to get ShellExecute behaviour for other apps.
+                        subprocess.Popen(["cmd.exe", "/c", "start", "", cmd[0]] + cmd[1:], shell=False)
+                else:
+                    subprocess.Popen(cmd)
+
                 self.display_message("SYSTEM", f">> Opening: {app_name.upper()}", "assistant")
             except Exception as e:
                 self.display_message("ERROR", f"Failed to open {app_name}: {str(e)}", "error")
@@ -638,45 +812,95 @@ class OllamaAssistantGUI:
             
             selected_model = self.selected_model.get()
             self.log_event(f"Requesting response from Ollama model {selected_model}")
-            
+
+            assistant_message = ""
+            self.root.after(0, self.insert_assistant_prefix)
+            streamed = False
+
             # Try Python module first
             try:
-                response = ollama.chat(
+                response_stream = ollama.chat(
                     model=selected_model,
                     messages=self.conversation_history,
-                    stream=False
+                    stream=True
                 )
-                assistant_message = response['message']['content']
-            except (ImportError, ModuleNotFoundError):
+
+                if hasattr(response_stream, '__iter__') and not isinstance(response_stream, (str, bytes, dict)):
+                    for event in response_stream:
+                        chunk = self.normalize_stream_chunk(event)
+                        if chunk:
+                            streamed = True
+                            assistant_message += chunk
+                            self.root.after(0, self.queue_assistant_text, chunk)
+
+                    if not assistant_message:
+                        # Some Ollama stream objects may still expose a final message payload
+                        fallback = ""
+                        if isinstance(response_stream, dict):
+                            fallback = response_stream.get("message", {}).get("content", "")
+                        elif hasattr(response_stream, "message"):
+                            msg = getattr(response_stream, "message")
+                            if isinstance(msg, dict):
+                                fallback = msg.get("content", "") or ""
+                            elif hasattr(msg, "content"):
+                                fallback = str(getattr(msg, "content", "") or "")
+                        elif hasattr(response_stream, "content"):
+                            fallback = str(getattr(response_stream, "content", "") or "")
+                        if fallback:
+                            assistant_message = fallback
+                            streamed = False
+                            self.root.after(0, self.type_out_message, assistant_message + "\n\n")
+                else:
+                    if isinstance(response_stream, dict):
+                        assistant_message = response_stream.get("message", {}).get("content", "")
+                    else:
+                        assistant_message = str(response_stream)
+                    if assistant_message:
+                        self.root.after(0, self.type_out_message, assistant_message + "\n\n")
+                        streamed = True
+            except (ImportError, ModuleNotFoundError, AttributeError):
                 # Fallback: use Ollama CLI directly
                 if not self.ollama_binary:
                     raise RuntimeError("Ollama CLI not found and Python module unavailable")
-                
+
                 import json as json_module
                 messages_json = json_module.dumps(self.conversation_history)
-                result = subprocess.run(
-                    [self.ollama_binary, "run", selected_model, "--nostream"],
-                    input=messages_json,
-                    capture_output=True,
+                process = subprocess.Popen(
+                    [self.ollama_binary, "run", selected_model],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    check=False
+                    encoding='utf-8',
+                    errors='replace',
+                    bufsize=1
                 )
-                
-                if result.returncode != 0:
-                    self.log_event(f"Ollama CLI error code {result.returncode}: {result.stderr.strip()}", level="ERROR")
-                    raise RuntimeError(f"Ollama CLI error: {result.stderr}")
-                
-                assistant_message = result.stdout.strip()
-            
-            # Add to conversation history
+                process.stdin.write(messages_json)
+                process.stdin.close()
+
+                while True:
+                    char = process.stdout.read(1)
+                    if char == "":
+                        break
+                    streamed = True
+                    assistant_message += char
+                    self.root.after(0, self.queue_assistant_text, char)
+
+                process.wait()
+                if process.returncode != 0:
+                    self.log_event(f"Ollama CLI error code {process.returncode}", level="ERROR")
+                    raise RuntimeError(f"Ollama CLI error: return code {process.returncode}")
+
+            if not streamed:
+                self.root.after(0, self.type_out_message, assistant_message + "\n\n")
+            else:
+                self.root.after(0, self.queue_assistant_text, "\n\n")
+
             self.conversation_history.append({
                 "role": "assistant",
                 "content": assistant_message
             })
             self.log_event("AI response received")
-            
-            # Display assistant message
-            self.root.after(0, lambda: self.display_message("Assistant", assistant_message, "assistant"))
             
         except Exception as e:
             selected_model = self.selected_model.get()
@@ -688,6 +912,8 @@ class OllamaAssistantGUI:
             self.root.after(0, lambda: self.display_message("SYSTEM", error_message, "error"))
         
         finally:
+            # Stop thinking indicator
+            self.root.after(0, self.stop_thinking_indicator)
             # Re-enable send button
             self.root.after(0, lambda: self.send_button.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.input_field.config(state=tk.NORMAL))
@@ -742,3 +968,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = OllamaAssistantGUI(root)
     root.mainloop()
+
